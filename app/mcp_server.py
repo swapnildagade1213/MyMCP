@@ -1,83 +1,49 @@
 from fastapi import FastAPI, HTTPException
 from app.tools import register_tools, ToolInfo
+from app.executor import AsyncToolExecutor
 
 app = FastAPI()
+executor = AsyncToolExecutor()
 
-# ---------------------------------------------------
-# Handlers (business logic)
-# ---------------------------------------------------
-def echo_handler(text: str):
+# ---------------------------
+# Register handlers
+# ---------------------------
+async def echo_handler(text: str):
     return f"Echo: {text}"
 
-def add_handler(a: float, b: float):
+async def add_handler(a: float, b: float):
     return a + b
 
-def multiply_handler(a: float, b: float):
+async def multiply_handler(a: float, b: float):
     return a * b
 
+executor.register("echo", echo_handler)
+executor.register("add", add_handler)
+executor.register("multiply", multiply_handler)
 
-# Map tool name -> handler function
-HANDLERS = {
-    "echo": echo_handler,
-    "add": add_handler,
-    "multiply": multiply_handler
-}
-
-# Load ToolInfo objects
 TOOLS: list[ToolInfo] = register_tools()
 
-
-# ---------------------------------------------------
+# ---------------------------
 # Routes
-# ---------------------------------------------------
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-# ✅ List all tools with metadata
-@app.get("/tools")
-def list_tools(include_hidden: bool = False):
-    result = []
-    for tinfo in TOOLS:
-        if not tinfo.visible and not include_hidden:
-            continue
-
-        result.append({
-            "name": tinfo.tool.name,
-            "description": tinfo.tool.description,
-            "parameters": tinfo.tool.parameters,
-            "category": tinfo.category,
-            "tags": tinfo.tags,
-            "version": tinfo.version,
-            "author": tinfo.author,
-            "visible": tinfo.visible
-        })
-    return result
-
-
-# ✅ Dynamic Tool Invocation
+# ---------------------------
 @app.post("/tool/{tool_name}")
 async def call_tool(tool_name: str, payload: dict):
-    tool_info = next((t for t in TOOLS if t.tool.name == tool_name), None)
-    if not tool_info:
-        raise HTTPException(status_code=404, detail="Tool not found")
+    tool = next((t for t in TOOLS if t.tool.name == tool_name), None)
+    if not tool:
+        raise HTTPException(404, "Tool not found")
 
-    if not tool_info.visible:
-        raise HTTPException(status_code=403, detail="Tool is hidden")
-
-    handler = HANDLERS.get(tool_name)
-    if not handler:
-        raise HTTPException(status_code=500, detail="Handler not registered")
+    if not tool.visible:
+        raise HTTPException(403, "Tool is hidden")
 
     try:
-        result = handler(**payload)
+        result = await executor.execute(tool_name, payload)
     except TypeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid parameters: {str(e)}")
+        raise HTTPException(400, f"Invalid parameters: {e}")
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
     return {
         "tool": tool_name,
-        "category": tool_info.category,
+        "category": tool.category,
         "result": result
     }
