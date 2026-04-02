@@ -1,23 +1,22 @@
-
-from fastmcp import FastMCP
-from app.resources import register_resources
 from app.tools import register_tools
-from app.logger import log
 
-mcp = FastMCP("fastmcp-example-server")
+def echo_handler(text: str):
+    return f"Echo: {text}"
 
-# Register tools
-for tool in register_tools():
-    mcp.add_tool(tool)
+class MCPServer:
+    def __init__(self):
+        self.handlers = {}
 
-# Register resources
-for resource in register_resources():
-    mcp.add_resource(resource)
+    def add_tool(self, name, func):
+        self.handlers[name] = func
+
+    def run(self):
+        print("Server ready")
+
+server = MCPServer()
+
+# Register all tools + their handlers
+server.add_tool("echo", echo_handler)
 
 def run_server():
-    log("Launching FastMCP server on port 8000...")
-    mcp.run(
-        transport="streamable-http", 
-        host="0.0.0.0",
-        port=8000
-    )
+    server.run()
