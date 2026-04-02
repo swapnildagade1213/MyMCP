@@ -26,7 +26,18 @@ TOOLS: list[ToolInfo] = register_tools()
 
 print("Loaded Tools:", TOOLS)   # ✅ Debug for Render logs
 
-
+@app.get("/")
+def homepage():
+    return {
+        "message": "✅ MCP Server is running",
+        "available_endpoints": {
+            "/health": "Health check",
+            "/tools": "List all available tools",
+            "/tool/{name}": "Execute a specific tool"
+        },
+        "docs": "/docs",
+        "openapi": "/openapi.json"
+    }
 # ---------------------------
 # ROUTES
 # ---------------------------
