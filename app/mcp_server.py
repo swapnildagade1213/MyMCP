@@ -2,7 +2,14 @@ from fastapi import FastAPI, HTTPException
 from app.tools import register_tools, ToolInfo
 from app.executor import AsyncToolExecutor
 
-app = FastAPI()
+app = FastAPI(
+    title="MCP Server",
+    description="Async MCP Tool Server with FastAPI",
+    version="1.0.0",
+    docs_url="/docs",          # ✅ Swagger UI
+    redoc_url="/redoc",        # ✅ Optional: ReDoc UI
+    openapi_url="/openapi.json" # ✅ OpenAPI schema
+)
 
 executor = AsyncToolExecutor()
 
