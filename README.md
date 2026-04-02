@@ -1,0 +1,1 @@
+FastMCP example for PythonAnywhere
