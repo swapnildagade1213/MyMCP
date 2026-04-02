@@ -1,22 +1,45 @@
+from fastapi import FastAPI
+from fastapi import HTTPException
 from app.tools import register_tools
 
+app = FastAPI()
+
+# ---------------------------------------------
+# Handlers for tools (business logic)
+# ---------------------------------------------
 def echo_handler(text: str):
     return f"Echo: {text}"
 
-class MCPServer:
-    def __init__(self):
-        self.handlers = {}
+# Map tool name → handler function
+HANDLERS = {
+    "echo": echo_handler
+}
 
-    def add_tool(self, name, func):
-        self.handlers[name] = func
+# ---------------------------------------------
+# Register tools as HTTP endpoints
+# ---------------------------------------------
+TOOLS = register_tools()
 
-    def run(self):
-        print("Server ready")
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
-server = MCPServer()
+# For each tool, make a POST endpoint:
+for tool in TOOLS:
+    route = f"/tools/{tool.name}"
 
-# Register all tools + their handlers
-server.add_tool("echo", echo_handler)
+    async def dynamic_tool_endpoint(payload: dict, t=tool):
+        handler = HANDLERS.get(t.name)
+        if not handler:
+            raise HTTPException(status_code=404, detail="Handler not found")
 
-def run_server():
-    server.run()
+        # extract params dynamically
+        try:
+            result = handler(**payload)
+        except TypeError:
+            raise HTTPException(status_code=400, detail="Invalid input schema")
+
+        return {"result": result}
+
+    # Dynamically add the route
+    app.post(route)(dynamic_tool_endpoint)
