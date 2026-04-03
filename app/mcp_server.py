@@ -2,8 +2,9 @@
 import logging
 from typing import Any, Optional
 from contextlib import asynccontextmanager
+import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -13,6 +14,12 @@ from app.executor import AsyncToolExecutor
 # ---------------------------
 # Logging Configuration
 # ---------------------------
+# Provide a sensible default logging configuration when none exists.
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=os.getenv("MCP_LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
 logger = logging.getLogger(__name__)
 
 # ---------------------------
@@ -41,30 +48,7 @@ class ToolMetadataResponse(BaseModel):
     visible: bool
 
 # ---------------------------
-# Application Lifecycle
-# ---------------------------
-async def initialize_tools(executor: AsyncToolExecutor) -> None:
-    """Register all built-in tool handlers."""
-    executor.register("echo", echo_handler)
-    executor.register("add", add_handler)
-    executor.register("multiply", multiply_handler)
-    logger.info("Built-in tool handlers registered")
-
-async def startup_event() -> None:
-    """App startup lifecycle event."""
-    logger.info("MCP Server starting up...")
-    await initialize_tools(executor)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Manage application lifecycle."""
-    await startup_event()
-    logger.info("✅ MCP Server initialized successfully")
-    yield
-    logger.info("MCP Server shutting down...")
-
-# ---------------------------
-# Tool Handlers
+# Tool Handlers (built-in)
 # ---------------------------
 async def echo_handler(text: str) -> str:
     """Echo back the input text."""
@@ -79,31 +63,60 @@ async def multiply_handler(a: float, b: float) -> float:
     return a * b
 
 # ---------------------------
-# Application Setup
+# Application Lifecycle helpers
 # ---------------------------
-executor = AsyncToolExecutor()
+async def initialize_tools(executor: AsyncToolExecutor) -> None:
+    """Register all built-in tool handlers into the executor."""
+    # register core built-ins
+    executor.register("echo", echo_handler)
+    executor.register("add", add_handler)
+    executor.register("multiply", multiply_handler)
+    logger.info("Built-in tool handlers registered")
 
-app = FastAPI(
-    title="MCP Server",
-    description="Async MCP Tool Server with FastAPI",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
-    lifespan=lifespan
-)
+async def startup_event(app: FastAPI) -> None:
+    """App startup lifecycle event — create executor and load tools."""
+    logger.info("MCP Server starting up...")
+    # create executor and register built-ins
+    executor = AsyncToolExecutor()
+    await initialize_tools(executor)
+    # load external tools from registry and store both on app.state
+    tools = register_tools()
+    app.state.executor = executor
+    app.state.tools = tools
+    logger.info(f"Loaded {len(tools)} tools from registry")
+    logger.info("✅ MCP Server initialized successfully")
 
-# Load registered tools
-TOOLS: list[ToolInfo] = register_tools()
-logger.info(f"Loaded {len(TOOLS)} tools from registry")
+async def shutdown_event(app: FastAPI) -> None:
+    """App shutdown lifecycle event — gracefully stop executor if supported."""
+    logger.info("MCP Server shutting down...")
+    executor: Optional[AsyncToolExecutor] = getattr(app.state, "executor", None)
+    if executor is not None:
+        # if the executor provides an async shutdown/close, call it.
+        shutdown = getattr(executor, "shutdown", None)
+        if callable(shutdown):
+            try:
+                result = shutdown()
+                # shutdown may or may not be a coroutine
+                if hasattr(result, "__await__"):
+                    await result
+            except Exception as e:
+                logger.warning("Executor shutdown raised an exception: %s", e)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle."""
+    await startup_event(app)
+    try:
+        yield
+    finally:
+        await shutdown_event(app)
 
 # ---------------------------
 # Helper Functions
 # ---------------------------
-def find_tool(tool_name: str) -> Optional[ToolInfo]:
-    """Find a tool by name. Returns None if not found."""
-    return next((t for t in TOOLS if t.tool.name == tool_name), None)
-
+def find_tool(tool_name: str, tools: list[ToolInfo]) -> Optional[ToolInfo]:
+    """Find a tool by name in the provided tools list. Returns None if not found."""
+    return next((t for t in tools if t.tool.name == tool_name), None)
 
 def build_tool_metadata(tool_info: ToolInfo) -> ToolMetadataResponse:
     """Convert ToolInfo to response model."""
@@ -119,11 +132,24 @@ def build_tool_metadata(tool_info: ToolInfo) -> ToolMetadataResponse:
     )
 
 # ---------------------------
+# Application Setup
+# ---------------------------
+app = FastAPI(
+    title="MCP Server",
+    description="Async MCP Tool Server with FastAPI",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    lifespan=lifespan
+)
+
+# ---------------------------
 # Routes
 # ---------------------------
 # Enterprise-styled homepage returning HTML
 @app.get("/", response_class=HTMLResponse, tags=["Info"])
-def homepage() -> HTMLResponse:
+def homepage(request: Request) -> HTMLResponse:
     """Homepage with enterprise look and feel (returns HTML)."""
     html = """
     <!doctype html>
@@ -252,9 +278,8 @@ def homepage() -> HTMLResponse:
     </body>
     </html>
     """
-    # Avoid calling str.format on large HTML containing literal curly braces used by CSS.
-    # Replace only the intended placeholders.
-    html = html.replace("{loaded}", str(len(TOOLS))).replace("{logger}", logger.name if logger else "mcp_server")
+    tools = getattr(request.app.state, "tools", [])
+    html = html.replace("{loaded}", str(len(tools))).replace("{logger}", logger.name if logger else "mcp_server")
     return HTMLResponse(content=html, status_code=200)
 
 @app.get("/health", tags=["Health"])
@@ -263,21 +288,29 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 @app.get("/tools", tags=["Tools"], response_model=list[ToolMetadataResponse])
-def list_tools(include_hidden: bool = False) -> list[ToolMetadataResponse]:
+def list_tools(request: Request, include_hidden: bool = False) -> list[ToolMetadataResponse]:
     """List all available tools with optional hidden tool inclusion."""
-    tools = [
+    tools = getattr(request.app.state, "tools", [])
+    visible_tools = [
         build_tool_metadata(t)
-        for t in TOOLS
+        for t in tools
         if t.visible or include_hidden
     ]
-    logger.info(f"Retrieved {len(tools)} tools (include_hidden={include_hidden})")
-    return tools
+    logger.info(f"Retrieved {len(visible_tools)} tools (include_hidden={include_hidden})")
+    return visible_tools
 
 @app.post("/tool/{tool_name}", tags=["Tools"], response_model=ToolExecutionResponse)
-async def call_tool(tool_name: str, request: ToolExecutionRequest) -> ToolExecutionResponse:
+async def call_tool(request: Request, tool_name: str, payload: ToolExecutionRequest) -> ToolExecutionResponse:
     """Execute a specific tool with provided parameters."""
-    # Validate tool exists
-    tool_info = find_tool(tool_name)
+    tools = getattr(request.app.state, "tools", [])
+    executor: Optional[AsyncToolExecutor] = getattr(request.app.state, "executor", None)
+
+    # Validate executor/tool availability
+    if executor is None:
+        logger.error("Executor not initialized")
+        raise HTTPException(status_code=503, detail="Executor not initialized")
+
+    tool_info = find_tool(tool_name, tools)
     if not tool_info:
         logger.warning(f"Tool not found: {tool_name}")
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
@@ -287,19 +320,31 @@ async def call_tool(tool_name: str, request: ToolExecutionRequest) -> ToolExecut
         logger.warning(f"Attempt to access hidden tool: {tool_name}")
         raise HTTPException(status_code=403, detail="Tool is hidden")
 
-    # Execute tool
+    # Basic parameter validation if tool metadata provides "required" spec
+    params = payload.params or {}
     try:
-        logger.info(f"Executing tool: {tool_name} with params: {request.params}")
-        result = await executor.execute(tool_name, request.params)
-        logger.info(f"Tool execution successful: {tool_name}")
+        required = []
+        if isinstance(tool_info.tool.parameters, dict):
+            required = tool_info.tool.parameters.get("required", []) if "required" in tool_info.tool.parameters else []
+        missing = [k for k in required if k not in params]
+        if missing:
+            logger.debug("Missing required parameters for %s: %s", tool_name, missing)
+            raise HTTPException(status_code=400, detail=f"Missing required parameters: {missing}")
+
+        logger.info("Executing tool: %s with params: %s", tool_name, params)
+        result = await executor.execute(tool_name, params)
+        logger.info("Tool execution successful: %s", tool_name)
+    except HTTPException:
+        raise
     except TypeError as e:
-        logger.error(f"Invalid parameters for {tool_name}: {e}")
+        logger.error("Invalid parameters for %s: %s", tool_name, e)
         raise HTTPException(status_code=400, detail=f"Invalid parameters: {str(e)}")
     except ValueError as e:
-        logger.error(f"Execution error for {tool_name}: {e}")
+        logger.error("Execution error for %s: %s", tool_name, e)
         raise HTTPException(status_code=400, detail=f"Execution error: {str(e)}")
     except Exception as e:
-        logger.error(f"Unexpected error executing {tool_name}: {e}", exc_info=True)
+        logger.error("Unexpected error executing %s: %s", tool_name, e, exc_info=True)
+        # Do not expose internal details in production; return generic message.
         raise HTTPException(status_code=500, detail="Internal server error")
 
     return ToolExecutionResponse(
