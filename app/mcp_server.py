@@ -203,7 +203,7 @@ def homepage() -> HTMLResponse:
                 </div>
                 <div class="endpoint">
                   <strong>POST /tool/{tool_name}</strong>
-                  <small>Execute a tool with JSON payload {"{"} \"params\": {{...}} {"}"}</small>
+                  <small>Execute a tool with JSON payload {"{"} "params": {{...}} {"}"}</small>
                 </div>
                 <div class="endpoint">
                   <strong>GET /docs</strong>
@@ -251,7 +251,10 @@ def homepage() -> HTMLResponse:
       </div>
     </body>
     </html>
-    """.format(loaded=len(TOOLS), logger=logger.name if logger else "mcp_server")
+    """
+    # Avoid calling str.format on large HTML containing literal curly braces used by CSS.
+    # Replace only the intended placeholders.
+    html = html.replace("{loaded}", str(len(TOOLS))).replace("{logger}", logger.name if logger else "mcp_server")
     return HTMLResponse(content=html, status_code=200)
 
 @app.get("/health", tags=["Health"])
